@@ -61,6 +61,11 @@ async function gqlRequest(query: string, variables: Record<string, any>): Promis
 async function resolveSource(source: any): Promise<VideoSource[]> {
     let rawUrl: string = source.sourceUrl ?? "";
 
+    if (!rawUrl) {
+        console.warn("[AllManga] No sourceUrl provided");
+        return [];
+    }
+
     // Strip leading "--" and decode the obfuscated path
     if (rawUrl.startsWith("--")) {
         rawUrl = decodeUrl(rawUrl.slice(2));
@@ -71,8 +76,11 @@ async function resolveSource(source: any): Promise<VideoSource[]> {
         ? rawUrl
         : `${BASE}${rawUrl.startsWith("/") ? rawUrl : "/" + rawUrl}`;
 
+    console.log(`[AllManga] Resolving source: ${absoluteUrl.substring(0, 50)}...`);
+
     // --- Case 2: fast4speed direct stream ---
     if (absoluteUrl.includes("tools.fast4speed.rsvp")) {
+        console.log("[AllManga] Detected fast4speed stream");
         return [{
             url: absoluteUrl,
             quality: "1080p",
@@ -84,38 +92,83 @@ async function resolveSource(source: any): Promise<VideoSource[]> {
     // Fetch the clock.json endpoint
     let clockJson: any;
     try {
+        console.log(`[AllManga] Fetching clock endpoint...`);
         const res = await fetch(absoluteUrl, {
-            headers: { "Referer": REFERER, "User-Agent": AGENT },
+            headers: { 
+                "Referer": REFERER, 
+                "User-Agent": AGENT,
+                "Accept": "application/json",
+            },
         });
-        if (!res.ok) throw new Error(`Clock fetch failed: ${res.status}`);
-        clockJson = await res.json();
+        
+        if (!res.ok) {
+            throw new Error(`Clock fetch failed with status ${res.status}`);
+        }
+        
+        const responseText = await res.text();
+        
+        // Try to parse JSON
+        try {
+            clockJson = JSON.parse(responseText);
+        } catch (parseError) {
+            console.error(`[AllManga] Failed to parse clock response as JSON`);
+            console.error(`[AllManga] Response preview: ${responseText.substring(0, 200)}`);
+            return [];
+        }
+        
     } catch (e: any) {
         console.error(`[AllManga] Clock fetch error: ${e.message}`);
+        console.error(`[AllManga] Attempted URL: ${absoluteUrl}`);
+        return [];
+    }
+
+    if (!clockJson) {
+        console.warn("[AllManga] Empty clock response");
         return [];
     }
 
     const links: any[] = clockJson?.links ?? [];
+    
+    if (links.length === 0) {
+        console.warn("[AllManga] No links found in clock response");
+        return [];
+    }
+
+    console.log(`[AllManga] Found ${links.length} link(s) in clock response`);
+
     const videoSources: VideoSource[] = [];
 
     for (const linkObj of links) {
         const link: string = linkObj.link ?? "";
+        
+        if (!link) {
+            console.warn("[AllManga] Link object missing 'link' field");
+            continue;
+        }
+        
         const referer: string = linkObj.headers?.Referer ?? REFERER;
 
         // --- Case 1: wixmp repackager ---
         // URL format: https://repackager.wixmp.com/<base>,360p,480p,720p,1080p,<suffix>.urlset/...
         if (link.includes("repackager.wixmp.com")) {
-            const stripped = link.split(".urlset")[0].replace("repackager.wixmp.com/", "");
-            const parts = stripped.split(",");
-            const base = parts[0];
-            const suffix = parts[parts.length - 1];
-            const qualities = parts.slice(1, -1); // e.g. ["360p","480p","720p","1080p"]
-            for (const q of qualities) {
-                videoSources.push({
-                    url: base + q + suffix,
-                    quality: q,
-                    type: "m3u8",
-                    subtitles: [],
-                });
+            console.log("[AllManga] Detected wixmp repackager stream");
+            try {
+                const stripped = link.split(".urlset")[0].replace("repackager.wixmp.com/", "");
+                const parts = stripped.split(",");
+                const base = parts[0];
+                const suffix = parts[parts.length - 1];
+                const qualities = parts.slice(1, -1); // e.g. ["360p","480p","720p","1080p"]
+                
+                for (const q of qualities) {
+                    videoSources.push({
+                        url: base + q + suffix,
+                        quality: q,
+                        type: "m3u8",
+                        subtitles: [],
+                    });
+                }
+            } catch (e: any) {
+                console.error(`[AllManga] Failed to parse wixmp URL: ${e.message}`);
             }
             continue;
         }
@@ -123,11 +176,31 @@ async function resolveSource(source: any): Promise<VideoSource[]> {
         // --- Case 3: standard m3u8 playlist ---
         // Fetch the playlist to enumerate quality variants
         try {
+            console.log("[AllManga] Fetching m3u8 playlist...");
             const playlistRes = await fetch(link, {
-                headers: { "Referer": referer, "User-Agent": AGENT },
+                headers: { 
+                    "Referer": referer, 
+                    "User-Agent": AGENT,
+                    "Accept": "*/*",
+                },
             });
-            if (!playlistRes.ok) throw new Error(`Playlist fetch failed: ${playlistRes.status}`);
+            
+            if (!playlistRes.ok) {
+                throw new Error(`Playlist fetch failed with status ${playlistRes.status}`);
+            }
+            
             const playlistText = await playlistRes.text();
+
+            if (!playlistText || playlistText.length === 0) {
+                console.warn("[AllManga] Empty playlist response");
+                videoSources.push({
+                    url: link,
+                    quality: linkObj.resolutionStr ?? "auto",
+                    type: "m3u8",
+                    subtitles: [],
+                });
+                continue;
+            }
 
             // Extract resolution + URI pairs from the m3u8
             const streamRegex = /#EXT-X-STREAM-INF:[^\n]*RESOLUTION=\d+x(\d+)[^\n]*\n([^\n]+)/g;
@@ -151,15 +224,19 @@ async function resolveSource(source: any): Promise<VideoSource[]> {
 
             // If there were no variant streams it's already the direct stream
             if (!foundVariants) {
+                console.log("[AllManga] No m3u8 variants found, using as direct stream");
                 videoSources.push({
                     url: link,
                     quality: linkObj.resolutionStr ?? "auto",
                     type: "m3u8",
                     subtitles: [],
                 });
+            } else {
+                console.log(`[AllManga] Found ${foundVariants ? videoSources.length : 0} quality variants`);
             }
         } catch (e: any) {
             console.error(`[AllManga] Playlist parse error: ${e.message}`);
+            console.error(`[AllManga] Playlist URL: ${link}`);
             // Fall back to the raw link
             videoSources.push({
                 url: link,
@@ -168,6 +245,12 @@ async function resolveSource(source: any): Promise<VideoSource[]> {
                 subtitles: [],
             });
         }
+    }
+
+    if (videoSources.length === 0) {
+        console.warn("[AllManga] No video sources could be resolved");
+    } else {
+        console.log(`[AllManga] Successfully resolved ${videoSources.length} video source(s)`);
     }
 
     return videoSources;
@@ -283,6 +366,10 @@ class Provider {
         console.log(`[AllManga] Using source: ${selected.sourceName}`);
 
         const videoSources = await resolveSource(selected);
+
+        if (videoSources.length === 0) {
+            throw new Error(`Failed to resolve video sources from ${selected.sourceName}`);
+        }
 
         return {
             server,
