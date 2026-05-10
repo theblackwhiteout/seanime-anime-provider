@@ -3,7 +3,7 @@
   "name": "AllManga",
   "manifestURI": "https://raw.githubusercontent.com/YOUR_USERNAME/allmanga-seanime-provider/main/manifest.json",
   "version": "0.1.0",
-  "author": "YOUR_USERNAME",
+  "author": "theblackwhiteout",
   "description": "Watch anime from allmanga.to with sub and dub support.",
   "type": "onlinestream-provider",
   "language": "javascript",
