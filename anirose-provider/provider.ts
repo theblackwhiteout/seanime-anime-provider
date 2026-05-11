@@ -1,158 +1,83 @@
-/// <reference path="./online-streaming-provider.d.ts" />
-/// <reference path="./core.d.ts"/>
+async findEpisodeServer(
+    episode: EpisodeDetails,
+    server: string
+): Promise<EpisodeServer> {
 
-class Provider {
-    private api: string = "{{baseUrl}}";
+    const watchUrl = episode.url;
 
-    getSettings(): Settings {
-        return {
-            episodeServers: ["VidE", "VidStream"],
-            supportsDub: true,
-        };
-    }
+    try {
+        // 1. Load AniRose watch page
+        const watchHtml = await this.GETText(watchUrl);
 
-    async search(query: SearchOptions): Promise<SearchResult[]> {
-        const url = `${this.api}/search?keyword=${encodeURIComponent(query.query)}`;
+        const iframeSrc = watchHtml.match(
+            /<iframe[^>]+src=["']([^"']+)["']/i
+        )?.[1];
 
-        try {
-            const html = await this.GETText(url);
-            const $ = LoadDoc(html);
-
-            const results: SearchResult[] = [];
-
-            $("div.film_list-wrap div.flw-item").each((_, el) => {
-                const href = el.find("a.film-poster-ahref").attr("href") ?? "";
-                const title = el.find("h3.film-name a").attr("title") ?? "";
-
-                results.push({
-                    id: href,
-                    url: `${this.api}${href}`,
-                    title,
-                    subOrDub: "both"
-                });
-            });
-
-            return results;
-        } catch (e: any) {
-            throw new Error(e);
+        if (!iframeSrc) {
+            throw new Error("Iframe not found on watch page");
         }
-    }
 
-    async findEpisodes(id: string): Promise<EpisodeDetails[]> {
-        const url = `${this.api}${id}`;
+        const iframeUrl = iframeSrc.startsWith("http")
+            ? iframeSrc
+            : new URL(iframeSrc, this.api).href;
 
-        try {
-            const html = await this.GETText(url);
+        // 2. Load Megaplay page
+        const playerHtml = await this.GETText(iframeUrl);
 
-            const match = html.match(/data-id="(\d+)"/);
-            if (!match) throw new Error("Anime ID not found");
+        // 3. Find JS API endpoint (Megaplay loads sources dynamically)
+        const apiMatch =
+            playerHtml.match(/fetch\(["']([^"']*api[^"']*)["']\)/i) ||
+            playerHtml.match(/["'](https?:\/\/[^"']*\/sources[^"']*)["']/i) ||
+            playerHtml.match(/["'](https?:\/\/[^"']*\/get[^"']*)["']/i);
 
-            const animeId = match[1];
-
-            const ajax = await this.GETJson<any>(
-                `${this.api}/ajax/episode/list/${animeId}`
-            );
-
-            const $ = LoadDoc(ajax.html);
-
-            const episodes: EpisodeDetails[] = [];
-
-            $("a.ep-item").each((_, el) => {
-                const num = parseInt(el.attr("data-number") ?? "0");
-
-                episodes.push({
-                    id: el.attr("data-id") ?? String(num),
-                    number: num,
-                    title: `Episode ${num}`,
-                    url: `${this.api}/Watch?id=${el.attr("data-number")}`
-                });
-            });
-
-            return episodes.reverse();
-        } catch (e: any) {
-            throw new Error(e);
+        if (!apiMatch) {
+            throw new Error("Megaplay API endpoint not found");
         }
-    }
 
-    async findEpisodeServer(
-        episode: EpisodeDetails,
-        server: string
-    ): Promise<EpisodeServer> {
+        const apiUrl = apiMatch[1];
 
-        const watchUrl = episode.url;
-
-        try {
-            const html = await this.GETText(watchUrl);
-
-            let iframe = html.match(/<iframe[^>]+src=["']([^"']+)["']/i)?.[1];
-
-            if (!iframe) {
-                throw new Error("Player iframe not found");
-            }
-
-            if (!iframe.startsWith("http")) {
-                iframe = new URL(iframe, this.api).href;
-            }
-
-            const playerHtml = await this.GETText(iframe);
-
-            const streamMatch =
-                playerHtml.match(/https?:\/\/[^"']+\.m3u8[^"']*/i) ||
-                playerHtml.match(/file:\s*["']([^"']+\.m3u8[^"']*)["']/i);
-
-            if (!streamMatch) {
-                throw new Error("Stream not found");
-            }
-
-            const streamUrl = streamMatch[1].replace(/\\\//g, "/");
-
-            const videoSources: VideoSource[] = [
-                {
-                    quality: "auto",
-                    url: streamUrl,
-                    type: "hls",
-                    subtitles: []
-                }
-            ];
-
-            return {
-                server: server === "default" ? "VidStream" : server,
-                headers: {
-                    Referer: iframe,
-                    Origin: new URL(iframe).origin,
-                    "User-Agent":
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
-                },
-                videoSources
-            };
-
-        } catch (e: any) {
-            throw new Error(e);
-        }
-    }
-
-    async _makeRequest(url: string): Promise<FetchResponse> {
-        const res = await fetch(url, {
-            method: "GET",
+        // 4. Request stream source JSON
+        const json = await fetch(apiUrl, {
             headers: {
+                Referer: iframeUrl,
+                Origin: new URL(iframeUrl).origin,
                 "User-Agent":
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-                Referer: this.api
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137"
             }
-        });
+        }).then(r => r.json());
 
-        if (!res.ok) {
-            throw new Error(`Request failed: ${res.status}`);
+        // 5. Extract stream URL
+        const streamUrl =
+            json?.sources?.[0]?.file ||
+            json?.source ||
+            json?.url;
+
+        if (!streamUrl) {
+            throw new Error("Stream URL not found in Megaplay response");
         }
 
-        return res;
-    }
+        // 6. Return to Seanime
+        const videoSources: VideoSource[] = [
+            {
+                quality: "auto",
+                url: streamUrl,
+                type: "hls",
+                subtitles: []
+            }
+        ];
 
-    async GETText(url: string): Promise<string> {
-        return await this._makeRequest(url).then(r => r.text());
-    }
+        return {
+            server: server === "default" ? "VidStream" : server,
+            headers: {
+                Referer: iframeUrl,
+                Origin: new URL(iframeUrl).origin,
+                "User-Agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137"
+            },
+            videoSources
+        };
 
-    async GETJson<T>(url: string): Promise<T> {
-        return await this._makeRequest(url).then(r => r.json());
+    } catch (e: any) {
+        throw new Error(e);
     }
 }
