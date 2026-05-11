@@ -2,11 +2,11 @@
   "id": "allmanga-provider",
   "name": "AllManga",
   "description": "AllManga (allmanga.to) online streaming provider for subbed and dubbed anime",
-  "manifestURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/manifest.json",
-  "version": "0.1.0",
+  "manifestURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/allmanga-seanime-provider/manifest.json",
+  "version": "1.0.0",
   "author": "theblackwhiteout",
   "type": "onlinestream-provider",
   "language": "typescript",
   "lang": "multi",
-  "payloadURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/provider.ts"
+  "payloadURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/allmanga-seanime-provider/provider.ts"
 }
