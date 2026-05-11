@@ -1,11 +1,12 @@
 {
-    "id": "anirose",
-    "name": "Anirose",
-    "description": "Anirose streaming provider extension for Seanime",
-    "author": "theblackwhiteout",
-    "manifestURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/src/anime/anirose/manifest.json",
-    "icon": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/src/anime/anirose/icon.png",
-    "type": "onlinestream-provider",
-    "language": "typescript",
-    "lang": "en"
+  "id": "anigum-provider",
+  "name": "Anigum",
+  "description": "Anigum (anirose.to) online streaming provider for subbed and dubbed anime",
+  "manifestURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/anigum-seanime-provider/manifest.json",
+  "version": "1.0.0",
+  "author": "theblackwhiteout",
+  "type": "onlinestream-provider",
+  "language": "typescript",
+  "lang": "multi",
+  "payloadURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/anigum-seanime-provider/provider.ts"
 }
