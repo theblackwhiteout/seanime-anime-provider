@@ -20,14 +20,14 @@ class Provider {
 
             const results: SearchResult[] = [];
 
-            $("div.film_list-wrap div.flw-item").each((_, elem) => {
-                const id = elem.find("a.film-poster-ahref").attr("href") ?? "";
-                const title = elem.find("h3.film-name a").attr("title") ?? "";
+            $("div.film_list-wrap div.flw-item").each((_, el) => {
+                const href = el.find("a.film-poster-ahref").attr("href") ?? "";
+                const title = el.find("h3.film-name a").attr("title") ?? "";
 
                 results.push({
-                    id: `${id}?dub=${query.dub}`,
-                    url: `${this.api}${id}`,
-                    title: title,
+                    id: href,
+                    url: `${this.api}${href}`,
+                    title,
                     subOrDub: "both"
                 });
             });
@@ -39,34 +39,32 @@ class Provider {
     }
 
     async findEpisodes(id: string): Promise<EpisodeDetails[]> {
-        const animeId = id.split("?dub")[0];
-        const url = `${this.api}${animeId}`;
+        const url = `${this.api}${id}`;
 
         try {
             const html = await this.GETText(url);
 
-            const animeMatch = html.match(/data-id="(\d+)"/);
-            if (!animeMatch) {
-                throw new Error("Anime ID not found");
-            }
+            const match = html.match(/data-id="(\d+)"/);
+            if (!match) throw new Error("Anime ID not found");
 
-            const internalId = animeMatch[1];
+            const animeId = match[1];
 
-            const ajaxUrl = `${this.api}/ajax/episode/list/${internalId}`;
-            const response = await this.GETJson<any>(ajaxUrl);
+            const ajax = await this.GETJson<any>(
+                `${this.api}/ajax/episode/list/${animeId}`
+            );
 
-            const $ = LoadDoc(response.html);
+            const $ = LoadDoc(ajax.html);
 
             const episodes: EpisodeDetails[] = [];
 
-            $("a.ep-item").each((_, elem) => {
-                const epNum = parseInt(elem.attr("data-number") ?? "0");
+            $("a.ep-item").each((_, el) => {
+                const num = parseInt(el.attr("data-number") ?? "0");
 
                 episodes.push({
-                    id: elem.attr("data-id") ?? "",
-                    number: epNum,
-                    title: `Episode ${epNum}`,
-                    url: `${this.api}/ajax/episode/servers/${elem.attr("data-id")}?dub=${id.split("?dub=")[1]}`
+                    id: el.attr("data-id") ?? String(num),
+                    number: num,
+                    title: `Episode ${num}`,
+                    url: `${this.api}/Watch?id=${el.attr("data-number")}`
                 });
             });
 
@@ -81,57 +79,51 @@ class Provider {
         server: string
     ): Promise<EpisodeServer> {
 
-        const dubRequested = episode.url.split("?dub=")[1] === "true";
-        const serverName = server === "default" ? "VidStream" : server;
+        const watchUrl = episode.url;
 
         try {
-            const response = await this.GETJson<any>(episode.url.split("?dub")[0]);
+            const html = await this.GETText(watchUrl);
 
-            const $ = LoadDoc(response.html);
+            let iframe = html.match(/<iframe[^>]+src=["']([^"']+)["']/i)?.[1];
 
-            let serverId = "";
-
-            $("div.server-item").each((_, elem) => {
-                const name = elem.text().trim();
-
-                if (
-                    name.includes(serverName) &&
-                    (
-                        (dubRequested && elem.attr("data-type") === "dub") ||
-                        (!dubRequested && elem.attr("data-type") === "sub")
-                    )
-                ) {
-                    serverId = elem.attr("data-id") ?? "";
-                }
-            });
-
-            if (!serverId) {
-                throw new Error("Server not found");
+            if (!iframe) {
+                throw new Error("Player iframe not found");
             }
 
-            const sourceResponse = await this.GETJson<any>(
-                `${this.api}/ajax/episode/sources/${serverId}`
-            );
+            if (!iframe.startsWith("http")) {
+                iframe = new URL(iframe, this.api).href;
+            }
 
-            const link = sourceResponse.link;
+            const playerHtml = await this.GETText(iframe);
+
+            const streamMatch =
+                playerHtml.match(/https?:\/\/[^"']+\.m3u8[^"']*/i) ||
+                playerHtml.match(/file:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+
+            if (!streamMatch) {
+                throw new Error("Stream not found");
+            }
+
+            const streamUrl = streamMatch[1].replace(/\\\//g, "/");
 
             const videoSources: VideoSource[] = [
                 {
                     quality: "auto",
-                    url: link,
+                    url: streamUrl,
                     type: "hls",
                     subtitles: []
                 }
             ];
 
             return {
-                server: serverName,
+                server: server === "default" ? "VidStream" : server,
                 headers: {
-                    Referer: this.api,
+                    Referer: iframe,
+                    Origin: new URL(iframe).origin,
                     "User-Agent":
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
                 },
-                videoSources: videoSources
+                videoSources
             };
 
         } catch (e: any) {
@@ -140,7 +132,7 @@ class Provider {
     }
 
     async _makeRequest(url: string): Promise<FetchResponse> {
-        const response = await fetch(url, {
+        const res = await fetch(url, {
             method: "GET",
             headers: {
                 "User-Agent":
@@ -149,18 +141,18 @@ class Provider {
             }
         });
 
-        if (!response.ok) {
-            throw new Error(`Failed request: ${response.status}`);
+        if (!res.ok) {
+            throw new Error(`Request failed: ${res.status}`);
         }
 
-        return response;
+        return res;
     }
 
     async GETText(url: string): Promise<string> {
-        return await this._makeRequest(url).then(res => res.text());
+        return await this._makeRequest(url).then(r => r.text());
     }
 
     async GETJson<T>(url: string): Promise<T> {
-        return await this._makeRequest(url).then(res => res.json());
+        return await this._makeRequest(url).then(r => r.json());
     }
 }
