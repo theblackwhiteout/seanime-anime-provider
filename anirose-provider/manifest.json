@@ -1,12 +1,24 @@
 {
-  "id": "anigum-provider",
-  "name": "Anigum",
-  "description": "Anigum (anirose.to) online streaming provider for subbed and dubbed anime",
-  "manifestURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/anigum-seanime-provider/manifest.json",
+  "id": "anirose",
+  "name": "AniRose",
+  "description": "AniRose streaming provider for Seanime Denshi",
+  "manifestURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/src/AniRose/manifest.json",
   "version": "1.0.0",
   "author": "theblackwhiteout",
   "type": "onlinestream-provider",
   "language": "typescript",
-  "lang": "multi",
-  "payloadURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/anigum-seanime-provider/provider.ts"
+  "lang": "en",
+  "payloadURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/src/AniRose/provider.ts",
+  "userConfig": {
+    "requiresConfig": false,
+    "version": 1,
+    "fields": [
+      {
+        "name": "baseUrl",
+        "label": "Base URL",
+        "type": "text",
+        "default": "https://anirose.to"
+      }
+    ]
+  }
 }
