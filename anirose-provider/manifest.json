@@ -3,8 +3,8 @@
     "name": "Anirose",
     "description": "Anirose streaming provider extension for Seanime",
     "author": "theblackwhiteout",
-    "manifestURI": "https://raw.githubusercontent.com/theblackwhiteout/Seanime-Providers/main/src/anime/anirose/manifest.json",
-    "icon": "https://raw.githubusercontent.com/theblackwhiteout/Seanime-Providers/main/src/anime/anirose/icon.png",
+    "manifestURI": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/src/anime/anirose/manifest.json",
+    "icon": "https://raw.githubusercontent.com/theblackwhiteout/seanime-anime-provider/main/src/anime/anirose/icon.png",
     "type": "onlinestream-provider",
     "language": "typescript",
     "lang": "en"
