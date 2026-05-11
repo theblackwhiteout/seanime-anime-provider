@@ -1,0 +1,36 @@
+{
+  "id": "anirose",
+  "name": "AniRose",
+  "description": "AniRose is an online streaming provider for subbed/dubbed animes in English",
+  "manifestURI": "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/Seanime-streaming-providers/refs/heads/main/src/AniRose/manifest.json",
+  "version": "1.0.0",
+  "author": "YourName",
+  "type": "onlinestream-provider",
+  "language": "typescript",
+  "lang": "en",
+  "payloadURI": "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/Seanime-streaming-providers/refs/heads/main/src/AniRose/provider.ts",
+  "userConfig": {
+    "requiresConfig": false,
+    "version": 1,
+    "fields":[
+      {
+        "name": "baseUrl",
+        "label": "Base URL",
+        "type": "text",
+        "default": "https://anirose.to"
+      },
+      {
+        "name": "batchSize",
+        "label": "Batch Size",
+        "type": "text",
+        "default": "50"
+      },
+      {
+        "name": "batchDelay",
+        "label": "Batch Delay",
+        "type": "text",
+        "default": "500"
+      }
+    ]
+  }
+}
