@@ -1,124 +1,166 @@
-/// <reference path="../goja_onlinestream_test/onlinestream-provider.d.ts" />
-/// <reference path="../goja_plugin_types/core.d.ts" />
-
-type AjaxServerResponse = {
-    html: string;
-}
-
-type AjaxSourceResponse = {
-    link: string;
-    type: string;
-}
+/// <reference path="./online-streaming-provider.d.ts" />
+/// <reference path="./core.d.ts"/>
 
 class Provider {
-    api = "https://anirose.to"
+    private api: string = "{{baseUrl}}";
 
     getSettings(): Settings {
         return {
-            // Updated to only include vidE and vidstream
-            episodeServers:["VidE", "VidStream"],
-            supportsDub: true, // Set to false if Anigum doesn't separate sub/dub here
-        }
+            episodeServers: ["VidE", "VidStream"],
+            supportsDub: true,
+        };
     }
 
-    async search(opts: SearchOptions): Promise<SearchResult[]> {
-        const req = await fetch(`${this.api}/search?keyword=${encodeURIComponent(opts.query)}`)
-        if (!req.ok) return[]
+    async search(query: SearchOptions): Promise<SearchResult[]> {
+        const url = `${this.api}/search?keyword=${encodeURIComponent(query.query)}`;
 
-        const html = await req.text()
-        const $ = LoadDoc(html)
-        const results: SearchResult[] =[]
+        try {
+            const html = await this.GETText(url);
+            const $ = LoadDoc(html);
 
-        // Extracting anime from Anigum's search results page
-        $(".film_list-wrap .flw-item").each((_, el) => {
-            const titleEl = $(el).find(".film-name a")
-            const title = titleEl.text().trim()
-            const url = titleEl.attr("href") ?? ""
-            const id = url.split("/").pop() ?? ""
-            
-            if (id && title) {
+            const results: SearchResult[] = [];
+
+            $("div.film_list-wrap div.flw-item").each((_, elem) => {
+                const id = elem.find("a.film-poster-ahref").attr("href") ?? "";
+                const title = elem.find("h3.film-name a").attr("title") ?? "";
+
                 results.push({
-                    id: id,
+                    id: `${id}?dub=${query.dub}`,
+                    url: `${this.api}${id}`,
                     title: title,
-                    url: `${this.api}${url}`,
-                    subOrDub: "sub", 
-                })
-            }
-        })
+                    subOrDub: "both"
+                });
+            });
 
-        return results
+            return results;
+        } catch (e: any) {
+            throw new Error(e);
+        }
     }
 
     async findEpisodes(id: string): Promise<EpisodeDetails[]> {
-        // Fetch the Anigum watch/details page
-        const req = await fetch(`${this.api}/watch/${id}`)
-        if (!req.ok) throw new Error("Anime not found")
+        const animeId = id.split("?dub")[0];
+        const url = `${this.api}${animeId}`;
 
-        const html = await req.text()
-        const $ = LoadDoc(html)
-        const episodes: EpisodeDetails[] =[]
+        try {
+            const html = await this.GETText(url);
 
-        // Parsing the episode list
-        $("#episodes-list a.ep-item").each((_, el) => {
-            const epNumStr = $(el).attr("data-number") ?? "0"
-            const epNum = parseFloat(epNumStr) // Using float just in case there are .5 episodes
-            const epId = $(el).attr("data-id") ?? ""
-            const epTitle = $(el).attr("title") ?? `Episode ${epNum}`
-            
-            if (epId) {
-                episodes.push({
-                    id: epId,
-                    number: epNum,
-                    title: epTitle,
-                    url: `${this.api}/watch/${id}?ep=${epId}`
-                })
+            const animeMatch = html.match(/data-id="(\d+)"/);
+            if (!animeMatch) {
+                throw new Error("Anime ID not found");
             }
-        })
 
-        return episodes.sort((a, b) => a.number - b.number)
+            const internalId = animeMatch[1];
+
+            const ajaxUrl = `${this.api}/ajax/episode/list/${internalId}`;
+            const response = await this.GETJson<any>(ajaxUrl);
+
+            const $ = LoadDoc(response.html);
+
+            const episodes: EpisodeDetails[] = [];
+
+            $("a.ep-item").each((_, elem) => {
+                const epNum = parseInt(elem.attr("data-number") ?? "0");
+
+                episodes.push({
+                    id: elem.attr("data-id") ?? "",
+                    number: epNum,
+                    title: `Episode ${epNum}`,
+                    url: `${this.api}/ajax/episode/servers/${elem.attr("data-id")}?dub=${id.split("?dub=")[1]}`
+                });
+            });
+
+            return episodes.reverse();
+        } catch (e: any) {
+            throw new Error(e);
+        }
     }
 
-    async findEpisodeServer(episode: EpisodeDetails, server: string): Promise<EpisodeServer> {
-        // Step 1: Hit Anigum's internal ajax endpoint to get the servers for the specific episode
-        const ajaxReq = await fetch(`${this.api}/ajax/episode/servers?episodeId=${episode.id}`)
-        if (!ajaxReq.ok) throw new Error("Failed to fetch servers from Anigum.")
-        
-        const ajaxData = await ajaxReq.json() as AjaxServerResponse
-        const $ = LoadDoc(ajaxData.html)
-        
-        let serverId = ""
+    async findEpisodeServer(
+        episode: EpisodeDetails,
+        server: string
+    ): Promise<EpisodeServer> {
 
-        // Find the server data-id matching "vidE" or "vidstream"
-        $(".server-item").each((_, el) => {
-            const serverName = $(el).text().trim().toLowerCase()
-            if (serverName.includes(server.toLowerCase())) {
-                serverId = $(el).attr("data-id") ?? ""
+        const dubRequested = episode.url.split("?dub=")[1] === "true";
+        const serverName = server === "default" ? "VidStream" : server;
+
+        try {
+            const response = await this.GETJson<any>(episode.url.split("?dub")[0]);
+
+            const $ = LoadDoc(response.html);
+
+            let serverId = "";
+
+            $("div.server-item").each((_, elem) => {
+                const name = elem.text().trim();
+
+                if (
+                    name.includes(serverName) &&
+                    (
+                        (dubRequested && elem.attr("data-type") === "dub") ||
+                        (!dubRequested && elem.attr("data-type") === "sub")
+                    )
+                ) {
+                    serverId = elem.attr("data-id") ?? "";
+                }
+            });
+
+            if (!serverId) {
+                throw new Error("Server not found");
             }
-        })
 
-        // Fallback to the first available server if the requested one is missing
-        if (!serverId) {
-            serverId = $(".server-item").first().attr("data-id") ?? ""
+            const sourceResponse = await this.GETJson<any>(
+                `${this.api}/ajax/episode/sources/${serverId}`
+            );
+
+            const link = sourceResponse.link;
+
+            const videoSources: VideoSource[] = [
+                {
+                    quality: "auto",
+                    url: link,
+                    type: "hls",
+                    subtitles: []
+                }
+            ];
+
+            return {
+                server: serverName,
+                headers: {
+                    Referer: this.api,
+                    "User-Agent":
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+                },
+                videoSources: videoSources
+            };
+
+        } catch (e: any) {
+            throw new Error(e);
         }
-        if (!serverId) throw new Error("No servers found for this episode.")
+    }
 
-        // Step 2: Extract the actual streaming source using the extracted Server ID
-        const linkReq = await fetch(`${this.api}/ajax/episode/sources?id=${serverId}`)
-        const linkData = await linkReq.json() as AjaxSourceResponse
+    async _makeRequest(url: string): Promise<FetchResponse> {
+        const response = await fetch(url, {
+            method: "GET",
+            headers: {
+                "User-Agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+                Referer: this.api
+            }
+        });
 
-        // Step 3: Parse and return the video stream to Seanime
-        // Note: If linkData.link gives an iframe URL instead of an M3U8, 
-        // you would need one more fetch here to scrape the iframe for the raw stream link.
-        return {
-            videoSources:[{
-                url: linkData.link,
-                type: linkData.link.includes(".m3u8") ? "m3u8" : "mp4",
-                quality: "auto",
-                subtitles: [], 
-                headers: { Referer: this.api }
-            }],
-            headers: { Referer: this.api },
-            server: server,
+        if (!response.ok) {
+            throw new Error(`Failed request: ${response.status}`);
         }
+
+        return response;
+    }
+
+    async GETText(url: string): Promise<string> {
+        return await this._makeRequest(url).then(res => res.text());
+    }
+
+    async GETJson<T>(url: string): Promise<T> {
+        return await this._makeRequest(url).then(res => res.json());
     }
 }
