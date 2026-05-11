@@ -1,61 +1,79 @@
 /// <reference path="./online-streaming-provider.d.ts" />
-/// <reference path="./core.d.ts" />
+/// <reference path="./core.d.ts"/>
 
 class Provider {
-
-    api = "{{baseUrl}}"
+    private api: string = "{{baseUrl}}";
 
     getSettings(): Settings {
         return {
-            episodeServers: [
-                "VidE 1", "VidE 2",
-                "VidStream 1", "VidStream 2"
-            ],
+            episodeServers: ["VidE", "VidStream"],
             supportsDub: true,
+        };
+    }
+
+    async search(query: SearchOptions): Promise<SearchResult[]> {
+        const url = `${this.api}/search?keyword=${encodeURIComponent(query.query)}`;
+
+        try {
+            const html = await this.GETText(url);
+            const $ = LoadDoc(html);
+
+            const results: SearchResult[] = [];
+
+            $("div.film_list-wrap div.flw-item").each((_, elem) => {
+                const id = elem.find("a.film-poster-ahref").attr("href") ?? "";
+                const title = elem.find("h3.film-name a").attr("title") ?? "";
+
+                results.push({
+                    id: `${id}?dub=${query.dub}`,
+                    url: `${this.api}${id}`,
+                    title: title,
+                    subOrDub: "both"
+                });
+            });
+
+            return results;
+        } catch (e: any) {
+            throw new Error(e);
         }
     }
 
-    async search(opts: SearchOptions): Promise<SearchResult[]> {
-        const html = await this.GETText(
-            `${this.api}/search?keyword=${encodeURIComponent(opts.query)}`
-        )
-
-        const $ = LoadDoc(html)
-        const results: SearchResult[] = []
-
-        $("div.film_list-wrap div.flw-item").each((_, el) => {
-            const id = el.find("a.film-poster-ahref").attr("href") ?? ""
-            const title = el.find("h3.film-name a").attr("title") ?? ""
-
-            results.push({
-                id,
-                url: `${this.api}${id}`,
-                title,
-                subOrDub: "both"
-            })
-        })
-
-        return results
-    }
-
     async findEpisodes(id: string): Promise<EpisodeDetails[]> {
-        const html = await this.GETText(`${this.api}${id}`)
-        const $ = LoadDoc(html)
+        const animeId = id.split("?dub")[0];
+        const url = `${this.api}${animeId}`;
 
-        const episodes: EpisodeDetails[] = []
+        try {
+            const html = await this.GETText(url);
 
-        $("a.ep-item").each((_, el) => {
-            const ep = parseInt(el.attr("data-number") ?? "0")
+            const animeMatch = html.match(/data-id="(\d+)"/);
+            if (!animeMatch) {
+                throw new Error("Anime ID not found");
+            }
 
-            episodes.push({
-                id: `${el.attr("data-id")}`,
-                number: ep,
-                title: `Episode ${ep}`,
-                url: `${this.api}/Watch?id=${el.attr("data-number")}`
-            })
-        })
+            const internalId = animeMatch[1];
 
-        return episodes.reverse()
+            const ajaxUrl = `${this.api}/ajax/episode/list/${internalId}`;
+            const response = await this.GETJson<any>(ajaxUrl);
+
+            const $ = LoadDoc(response.html);
+
+            const episodes: EpisodeDetails[] = [];
+
+            $("a.ep-item").each((_, elem) => {
+                const epNum = parseInt(elem.attr("data-number") ?? "0");
+
+                episodes.push({
+                    id: elem.attr("data-id") ?? "",
+                    number: epNum,
+                    title: `Episode ${epNum}`,
+                    url: `${this.api}/ajax/episode/servers/${elem.attr("data-id")}?dub=${id.split("?dub=")[1]}`
+                });
+            });
+
+            return episodes.reverse();
+        } catch (e: any) {
+            throw new Error(e);
+        }
     }
 
     async findEpisodeServer(
@@ -63,83 +81,86 @@ class Provider {
         server: string
     ): Promise<EpisodeServer> {
 
-        const watchHtml = await this.GETText(episode.url)
+        const dubRequested = episode.url.split("?dub=")[1] === "true";
+        const serverName = server === "default" ? "VidStream" : server;
 
-        // 1. Extract embed (Megaplay)
-        const embed =
-            watchHtml.match(/<iframe[^>]+src=["']([^"']+)["']/i)?.[1]
+        try {
+            const response = await this.GETJson<any>(episode.url.split("?dub")[0]);
 
-        if (!embed) throw new Error("Embed not found")
+            const $ = LoadDoc(response.html);
 
-        const embedUrl = embed.startsWith("http")
-            ? embed
-            : new URL(embed, this.api).href
+            let serverId = "";
 
-        // 2. Load Megaplay page
-        const playerHtml = await this.GETText(embedUrl)
+            $("div.server-item").each((_, elem) => {
+                const name = elem.text().trim();
 
-        // 3. Megaplay usually hides sources inside JS variables or fetch calls
-        const apiUrl =
-            playerHtml.match(/fetch\(["']([^"']*api[^"']*)["']\)/i)?.[1] ||
-            playerHtml.match(/["'](https?:\/\/[^"']*(source|stream|api)[^"']*)["']/i)?.[1]
+                if (
+                    name.includes(serverName) &&
+                    (
+                        (dubRequested && elem.attr("data-type") === "dub") ||
+                        (!dubRequested && elem.attr("data-type") === "sub")
+                    )
+                ) {
+                    serverId = elem.attr("data-id") ?? "";
+                }
+            });
 
-        if (!apiUrl) {
-            throw new Error("Megaplay API not found")
-        }
-
-        // 4. Get JSON source
-        const json = await fetch(apiUrl, {
-            headers: {
-                Referer: embedUrl,
-                Origin: new URL(embedUrl).origin,
-                "User-Agent":
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137"
+            if (!serverId) {
+                throw new Error("Server not found");
             }
-        }).then(r => r.json())
 
-        // 5. Extract stream
-        const stream =
-            json?.sources?.[0]?.file ||
-            json?.url ||
-            json?.source
+            const sourceResponse = await this.GETJson<any>(
+                `${this.api}/ajax/episode/sources/${serverId}`
+            );
 
-        if (!stream) throw new Error("Stream not found")
+            const link = sourceResponse.link;
 
-        const isVidE = server.startsWith("VidE")
-
-        return {
-            server,
-            headers: {
-                Referer: embedUrl,
-                Origin: new URL(embedUrl).origin,
-                "User-Agent":
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137"
-            },
-            videoSources: [
+            const videoSources: VideoSource[] = [
                 {
-                    url: stream,
+                    quality: "auto",
+                    url: link,
                     type: "hls",
-                    quality: isVidE ? "VidE" : "VidStream",
                     subtitles: []
                 }
-            ]
+            ];
+
+            return {
+                server: serverName,
+                headers: {
+                    Referer: this.api,
+                    "User-Agent":
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+                },
+                videoSources: videoSources
+            };
+
+        } catch (e: any) {
+            throw new Error(e);
         }
     }
 
     async _makeRequest(url: string): Promise<FetchResponse> {
-        const res = await fetch(url, {
+        const response = await fetch(url, {
+            method: "GET",
             headers: {
-                Referer: this.api,
                 "User-Agent":
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137"
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+                Referer: this.api
             }
-        })
+        });
 
-        if (!res.ok) throw new Error("Request failed")
-        return res
+        if (!response.ok) {
+            throw new Error(`Failed request: ${response.status}`);
+        }
+
+        return response;
     }
 
-    async GETText(url: string) {
-        return await this._makeRequest(url).then(r => r.text())
+    async GETText(url: string): Promise<string> {
+        return await this._makeRequest(url).then(res => res.text());
+    }
+
+    async GETJson<T>(url: string): Promise<T> {
+        return await this._makeRequest(url).then(res => res.json());
     }
 }
