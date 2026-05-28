@@ -1,372 +1,237 @@
-/// <reference path="./online-streaming-provider.d.ts" />
-/// <reference path="./core.d.ts" />
+/// <reference path="./onlinestream-provider.d.ts" />
 
-// AllManga (allmanga.to) — Seanime Online Streaming Provider
+/**
+ * Seanime Online Streaming Provider — ani-cli (allmanga.to)
+ *
+ * Replicates the scraping logic from ani-cli to feed episode lists
+ * and HLS/video sources into Seanime's online streaming system.
+ *
+ * Source site : https://allmanga.to  (same as ani-cli)
+ * Provider ID : ani-cli-provider
+ */
 
-interface GraphQLResponse {
-    data?: any;
+var BASE_URL = "https://allanime.day";
+var API_URL  = BASE_URL + "/api";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function rot13(str) {
+    return str.replace(/[a-zA-Z]/g, function (c) {
+        var base = c <= 'Z' ? 65 : 97;
+        return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base);
+    });
 }
 
-interface ClockResponse {
-    links?: Array<{
-        link: string;
-        headers?: {
-            Referer?: string;
-        };
-        resolutionStr?: string;
-    }>;
-}
-
-const BASE = "https://allmanga.to";
-const API_HOST = "https://api.allanime.day";
-const REFERER = "https://allmanga.to/";
-const AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-// Byte-to-character map for AllManga URL obfuscation
-const DECODE_MAP: Record<string, string> = {
-    "79": "A", "7a": "B", "7b": "C", "7c": "D", "7d": "E", "7e": "F", "7f": "G", "70": "H",
-    "71": "I", "72": "J", "73": "K", "74": "L", "75": "M", "76": "N", "77": "O", "68": "P",
-    "69": "Q", "6a": "R", "6b": "S", "6c": "T", "6d": "U", "6e": "V", "6f": "W", "60": "X",
-    "61": "Y", "62": "Z", "59": "a", "5a": "b", "5b": "c", "5c": "d", "5d": "e", "5e": "f",
-    "5f": "g", "50": "h", "51": "i", "52": "j", "53": "k", "54": "l", "55": "m", "56": "n",
-    "57": "o", "48": "p", "49": "q", "4a": "r", "4b": "s", "4c": "t", "4d": "u", "4e": "v",
-    "4f": "w", "40": "x", "41": "y", "42": "z", "08": "0", "09": "1", "0a": "2", "0b": "3",
-    "0c": "4", "0d": "5", "0e": "6", "0f": "7", "00": "8", "01": "9", "15": "-", "16": ".",
-    "67": "_", "46": "~", "02": ":", "17": "/", "07": "?", "1b": "#", "63": "[", "65": "]",
-    "78": "@", "19": "!", "1c": "$", "1e": "&", "10": "(", "11": ")", "12": "*", "13": "+",
-    "14": ",", "03": ";", "05": "=", "1d": "%"
-};
-
-function decodeUrl(encoded: string): string {
-    let out = "";
-    for (let i = 0; i < encoded.length; i += 2) {
-        const byte = encoded.substring(i, i + 2);
-        out += DECODE_MAP[byte] ?? "";
-    }
-    return out.replace(/\/clock/g, "/clock.json");
-}
-
-async function fetchWithRetry(url: string, options: any = {}, retries: number = 3): Promise<any> {
-    for (let i = 0; i < retries; i++) {
-        try {
-            const response = await fetch(url, {
-                headers: {
-                    "User-Agent": AGENT,
-                    "Referer": REFERER,
-                    ...options.headers
-                },
-                ...options
-            });
-            if (response.ok) return response;
-            if (response.status >= 500) throw new Error(`Server error: ${response.status}`);
-            return response; // Return non-5xx errors immediately
-        } catch (e: any) {
-            if (i === retries - 1) throw e;
-            console.log(`[AllManga] Retry ${i + 1}/${retries} for ${url}`);
-            $sleep(1000 * (i + 1));
+function decodeAnilistSource(encoded) {
+    // ani-cli decodes the source URL by applying ROT13 then decoding from hex
+    try {
+        var rotated = rot13(encoded);
+        // hex decode
+        var hex = rotated.replace(/\\x/g, '');
+        var result = '';
+        for (var i = 0; i < hex.length; i += 2) {
+            result += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
         }
+        return result;
+    } catch (e) {
+        return encoded;
     }
-    throw new Error("Max retries exceeded");
 }
 
-async function gqlRequest(query: string, variables: Record<string, any>): Promise<GraphQLResponse> {
-    console.log(`[AllManga] GraphQL query for: ${variables.search?.query || variables.showId || variables.episodeString}`);
-    
-    const response = await fetchWithRetry(`${API_HOST}/api`, {
+function gqlFetch(query, variables) {
+    var body = JSON.stringify({ query: query, variables: variables });
+    var res = fetch(API_URL, {
         method: "POST",
         headers: {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; Seanime)",
+            "Referer": "https://allmanga.to"
         },
-        body: JSON.stringify({ variables, query })
+        body: body
     });
-    
-    if (!response.ok) throw new Error(`GQL request failed: ${response.status}`);
-    return response.json();
+    return res.json();
 }
 
-async function resolveSource(source: any): Promise<VideoSource[]> {
-    let rawUrl: string = source.sourceUrl ?? "";
-    
-    if (!rawUrl) {
-        console.warn("[AllManga] No sourceUrl in source");
-        return [];
-    }
+// ─── GraphQL Queries (same logic as ani-cli) ─────────────────────────────────
 
-    console.log(`[AllManga] Resolving source from: ${source.sourceName}`);
+var SEARCH_QUERY = "\n    query ($search: SearchInput, $limit: Int, $page: Int, $translationType: VaildTranslationTypeEnumType) {\n        shows(\n            search: $search\n            limit: $limit\n            page: $page\n            translationType: $translationType\n        ) {\n            edges {\n                _id\n                name\n                englishName\n                nativeName\n                thumbnail\n                score\n                type\n                season { quarter year }\n                availableEpisodes { sub dub raw }\n            }\n        }\n    }\n";
 
-    // Decode obfuscated URLs
-    if (rawUrl.startsWith("--")) {
-        rawUrl = decodeUrl(rawUrl.slice(2));
-    }
+var EPISODES_QUERY = "\n    query ($showId: String!, $translationType: VaildTranslationTypeEnumType!, $episodeNumStart: Float, $episodeNumEnd: Float) {\n        show(_id: $showId) {\n            _id\n            name\n            availableEpisodesDetail\n        }\n        episodeInfos(\n            showId: $showId\n            translationType: $translationType\n            episodeNumStart: $episodeNumStart\n            episodeNumEnd: $episodeNumEnd\n        ) {\n            episodeIdNum\n            notes\n            vidInforssub { vidResolution vidPath }\n            vidInforsdub { vidResolution vidPath }\n        }\n    }\n";
 
-    // Build absolute URL
-    const absoluteUrl = rawUrl.startsWith("http")
-        ? rawUrl
-        : `${BASE}${rawUrl.startsWith("/") ? rawUrl : "/" + rawUrl}`;
+var SOURCES_QUERY = "\n    query ($showId: String!, $translationType: VaildTranslationTypeEnumType!, $episodeString: String!) {\n        episode(\n            showId: $showId\n            translationType: $translationType\n            episodeString: $episodeString\n        ) {\n            episodeString\n            sourceUrls\n        }\n    }\n";
 
-    // Handle fast4speed direct streams
-    if (absoluteUrl.includes("tools.fast4speed.rsvp")) {
-        console.log("[AllManga] Detected fast4speed stream");
-        return [{
-            url: absoluteUrl,
-            quality: "1080p",
-            type: "m3u8",
-            subtitles: []
-        }];
-    }
-
-    // Fetch clock endpoint
-    let clockData: ClockResponse;
-    try {
-        console.log(`[AllManga] Fetching clock endpoint...`);
-        const res = await fetchWithRetry(absoluteUrl, {
-            headers: { "Accept": "application/json" }
-        });
-        
-        if (!res.ok) {
-            throw new Error(`Clock fetch failed: ${res.status}`);
-        }
-        
-        const text = await res.text();
-        clockData = JSON.parse(text);
-    } catch (e: any) {
-        console.error(`[AllManga] Clock fetch error: ${e.message}`);
-        return [];
-    }
-
-    const links = clockData?.links ?? [];
-    if (links.length === 0) {
-        console.warn("[AllManga] No links in clock response");
-        return [];
-    }
-
-    console.log(`[AllManga] Found ${links.length} link(s) from clock endpoint`);
-
-    const videoSources: VideoSource[] = [];
-
-    for (const linkObj of links) {
-        const link = linkObj.link ?? "";
-        if (!link) continue;
-
-        const referer = linkObj.headers?.Referer ?? REFERER;
-
-        // Handle wixmp repackager URLs
-        if (link.includes("repackager.wixmp.com")) {
-            try {
-                console.log("[AllManga] Processing wixmp repackager URL");
-                const stripped = link.split(".urlset")[0].replace("repackager.wixmp.com/", "");
-                const parts = stripped.split(",");
-                const base = parts[0];
-                const suffix = parts[parts.length - 1];
-                const qualities = parts.slice(1, -1);
-                
-                for (const q of qualities) {
-                    videoSources.push({
-                        url: base + q + suffix,
-                        quality: q,
-                        type: "m3u8",
-                        subtitles: []
-                    });
-                }
-            } catch (e: any) {
-                console.error(`[AllManga] Wixmp parse error: ${e.message}`);
-            }
-            continue;
-        }
-
-        // Handle m3u8 playlists
-        try {
-            console.log(`[AllManga] Fetching m3u8 playlist...`);
-            const playlistRes = await fetchWithRetry(link, {
-                headers: { "Referer": referer }
-            });
-            
-            if (!playlistRes.ok) {
-                throw new Error(`Playlist fetch failed: ${playlistRes.status}`);
-            }
-            
-            const playlistText = await playlistRes.text();
-            if (!playlistText) {
-                console.warn("[AllManga] Empty playlist response");
-                continue;
-            }
-
-            // Parse m3u8 variants
-            const streamRegex = /#EXT-X-STREAM-INF:[^\n]*RESOLUTION=\d+x(\d+)[^\n]*\n([^\n]+)/g;
-            let match: RegExpExecArray | null;
-            let foundVariants = false;
-            const baseUri = link.substring(0, link.lastIndexOf("/") + 1);
-
-            while ((match = streamRegex.exec(playlistText)) !== null) {
-                foundVariants = true;
-                const height = match[1];
-                const uri = match[2].trim();
-                const variantUrl = uri.startsWith("http") ? uri : baseUri + uri;
-                
-                videoSources.push({
-                    url: variantUrl,
-                    quality: `${height}p`,
-                    type: "m3u8",
-                    subtitles: []
-                });
-            }
-
-            // If no variants, use as direct stream
-            if (!foundVariants) {
-                console.log("[AllManga] No m3u8 variants, using direct stream");
-                videoSources.push({
-                    url: link,
-                    quality: linkObj.resolutionStr ?? "auto",
-                    type: "m3u8",
-                    subtitles: []
-                });
-            }
-        } catch (e: any) {
-            console.error(`[AllManga] M3u8 parse error: ${e.message}`);
-            videoSources.push({
-                url: link,
-                quality: linkObj.resolutionStr ?? "auto",
-                type: link.includes(".m3u8") ? "m3u8" : "mp4",
-                subtitles: []
-            });
-        }
-    }
-
-    console.log(`[AllManga] Resolved ${videoSources.length} video source(s)`);
-    return videoSources;
-}
+// ─── Provider Class ───────────────────────────────────────────────────────────
 
 class Provider {
-    getSettings(): Settings {
+
+    getSettings() {
         return {
-            episodeServers: ["Luf-Mp4", "S-Mp4", "Yt-mp4", "Default"],
-            supportsDub: true
+            episodeServers: ["default", "sharepoint", "mp4upload"],
+            supportsAdult: false
         };
     }
 
-    async search(query: SearchOptions): Promise<SearchResult[]> {
-        const translationType = query.dub ? "dub" : "sub";
+    // ── Search ──────────────────────────────────────────────────────────────
 
-        const gql = `
-            query($search:SearchInput $limit:Int $page:Int $translationType:VaildTranslationTypeEnumType){
-                shows(search:$search limit:$limit page:$page translationType:$translationType){
-                    edges{ _id name availableEpisodes }
-                }
-            }
-        `;
+    search(opts) {
+        /**
+         * opts.query  : string  – the anime title
+         * opts.dub    : boolean – true if user wants dubbed
+         */
+        var query = opts.query;
+        var dub   = opts.dub || false;
 
         try {
-            const data = await gqlRequest(gql, {
-                search: { query: query.query, allowAdult: false, allowUnknown: false },
+            var translationType = dub ? "dub" : "sub";
+            var data = gqlFetch(SEARCH_QUERY, {
+                search: {
+                    allowAdult: false,
+                    allowUnknown: false,
+                    query: query
+                },
                 limit: 20,
                 page: 1,
-                translationType
+                translationType: translationType
             });
 
-            const edges = data?.data?.shows?.edges ?? [];
-            console.log(`[AllManga] Found ${edges.length} anime(s)`);
-            
-            return edges.map((s: any) => ({
-                id: `${s._id}|||${translationType}`,
-                title: s.name,
-                url: `${BASE}/bangumi/${s._id}`,
-                subOrDub: translationType as SubOrDub
-            }));
-        } catch (e: any) {
-            console.error(`[AllManga] Search error: ${e.message}`);
-            throw new Error(`AllManga search failed: ${e.message}`);
+            var edges = (data.data && data.data.shows && data.data.shows.edges) || [];
+
+            return edges.map(function (show) {
+                return {
+                    id: show._id,
+                    title: show.englishName || show.name || show.nativeName || "",
+                    image: show.thumbnail || "",
+                    year: show.season ? show.season.year : null
+                };
+            });
+        } catch (e) {
+            return [];
         }
     }
 
-    async findEpisodes(id: string): Promise<EpisodeDetails[]> {
-        const [showId, language] = id.split("|||");
-        const lang = language === "dub" ? "dub" : "sub";
+    // ── Episode List ─────────────────────────────────────────────────────────
 
-        const gql = `query($showId:String!){ show(_id:$showId){ _id availableEpisodesDetail } }`;
-        
+    getEpisodes(opts) {
+        /**
+         * opts.id  : string  – the show _id from search
+         * opts.dub : boolean – dubbed flag
+         */
+        var showId = opts.id;
+        var dub    = opts.dub || false;
+        var translationType = dub ? "dub" : "sub";
+
         try {
-            const data = await gqlRequest(gql, { showId });
-            const detail = data?.data?.show?.availableEpisodesDetail;
-            const eps: string[] = lang === "dub" ? (detail?.dub ?? []) : (detail?.sub ?? []);
+            var data = gqlFetch(EPISODES_QUERY, {
+                showId: showId,
+                translationType: translationType,
+                episodeNumStart: 0,
+                episodeNumEnd: 9999
+            });
 
-            console.log(`[AllManga] Found ${eps.length} episode(s)`);
+            var infos = (data.data && data.data.episodeInfos) || [];
 
-            return eps
-                .map(e => ({
-                    id: `${showId}|||${lang}|||${e}`,
-                    title: `Episode ${e}`,
-                    number: parseFloat(e),
-                    url: `${BASE}/bangumi/${showId}/episodes/${e}`
-                }))
-                .sort((a, b) => a.number - b.number);
-        } catch (e: any) {
-            console.error(`[AllManga] Episode fetch error: ${e.message}`);
-            throw new Error(`AllManga episode fetch failed: ${e.message}`);
+            if (!infos.length) {
+                // Fallback: derive episode list from availableEpisodesDetail
+                var show = data.data && data.data.show;
+                var detail = (show && show.availableEpisodesDetail) || {};
+                var epList = detail[translationType] || detail["sub"] || [];
+                return epList.map(function (epNum) {
+                    return {
+                        id: showId + "___" + translationType + "___" + epNum,
+                        number: parseFloat(epNum),
+                        title: "Episode " + epNum
+                    };
+                });
+            }
+
+            return infos.map(function (ep) {
+                return {
+                    id: showId + "___" + translationType + "___" + ep.episodeIdNum,
+                    number: parseFloat(ep.episodeIdNum),
+                    title: ep.notes ? ("Episode " + ep.episodeIdNum + " – " + ep.notes) : ("Episode " + ep.episodeIdNum)
+                };
+            });
+        } catch (e) {
+            return [];
         }
     }
 
-    async findEpisodeServer(episode: EpisodeDetails, server: string): Promise<EpisodeServer> {
-        const parts = episode.id.split("|||");
-        if (parts.length !== 3) throw new Error(`Invalid episode ID: ${episode.id}`);
+    // ── Video Sources ────────────────────────────────────────────────────────
 
-        const [showId, translationType, episodeString] = parts;
+    getVideoSource(opts) {
+        /**
+         * opts.episodeId : string – from getEpisodes
+         * opts.server    : string – "default", "sharepoint", "mp4upload"
+         */
+        var episodeId = opts.episodeId;
+        var parts = episodeId.split("___");
 
-        const gql = `
-            query($showId:String! $translationType:VaildTranslationTypeEnumType! $episodeString:String!){
-                episode(showId:$showId translationType:$translationType episodeString:$episodeString){
-                    sourceUrls
-                }
-            }
-        `;
+        if (parts.length < 3) {
+            return { sources: [] };
+        }
+
+        var showId          = parts[0];
+        var translationType = parts[1];
+        var episodeString   = parts[2];
 
         try {
-            const data = await gqlRequest(gql, { showId, translationType, episodeString });
-            const episodeData = data?.data?.episode;
-            const sources: any[] = episodeData?.sourceUrls ?? [];
+            var data = gqlFetch(SOURCES_QUERY, {
+                showId: showId,
+                translationType: translationType,
+                episodeString: episodeString
+            });
 
-            if (sources.length === 0) {
-                throw new Error(`No sources for episode ${episodeString}`);
+            var episode = data.data && data.data.episode;
+            if (!episode || !episode.sourceUrls) {
+                return { sources: [] };
             }
 
-            console.log(`[AllManga] Found ${sources.length} source(s)`);
+            var sourceUrls = episode.sourceUrls;
+            var sources = [];
 
-            // Preferred server names in priority order
-            const priority = ["Luf-Mp4", "S-Mp4", "Yt-mp4", "Default"];
+            for (var i = 0; i < sourceUrls.length; i++) {
+                var src = sourceUrls[i];
+                // sourceUrls are objects with { sourceUrl, priority, sourceName, type }
+                var rawUrl  = src.sourceUrl || "";
+                var srcName = (src.sourceName || "").toLowerCase();
+                var type    = src.type || "";
 
-            // Try the requested server first
-            let selected = sources.find(s =>
-                s.sourceName?.toLowerCase() === server.toLowerCase()
-            );
-            
-            // Fall back through priority list
-            if (!selected) {
-                for (const name of priority) {
-                    selected = sources.find(s =>
-                        s.sourceName?.toLowerCase() === name.toLowerCase()
-                    );
-                    if (selected) break;
+                // Skip sources that need further resolution we can't do in ES5
+                if (!rawUrl) continue;
+
+                // ani-cli-style decode: URLs starting with "--" are encoded
+                var url = rawUrl;
+                if (rawUrl.indexOf("--") === 0) {
+                    url = decodeAnilistSource(rawUrl.slice(2));
+                }
+
+                // Only include HLS or mp4 streams
+                if (url.indexOf("m3u8") !== -1 || url.indexOf(".mp4") !== -1 ||
+                    type === "player" || type === "iframe") {
+
+                    var quality = "auto";
+                    if (src.priority) {
+                        quality = "" + Math.round(src.priority * 1080) + "p";
+                    }
+
+                    sources.push({
+                        url: url,
+                        quality: quality,
+                        type: url.indexOf("m3u8") !== -1 ? "hls" : "mp4"
+                    });
                 }
             }
-            
-            // Last resort
-            if (!selected) selected = sources[0];
 
-            console.log(`[AllManga] Using source: ${selected.sourceName}`);
+            // Sort by priority (higher = better quality in allmanga's scheme)
+            sources.sort(function (a, b) {
+                var pa = parseFloat(a.quality) || 0;
+                var pb = parseFloat(b.quality) || 0;
+                return pb - pa;
+            });
 
-            const videoSources = await resolveSource(selected);
-
-            if (videoSources.length === 0) {
-                throw new Error(`Failed to resolve any video sources`);
-            }
-
-            return {
-                server,
-                videoSources,
-                headers: { "Referer": REFERER, "User-Agent": AGENT }
-            };
-        } catch (e: any) {
-            console.error(`[AllManga] Server error: ${e.message}`);
-            throw new Error(`AllManga server failed: ${e.message}`);
+            return { sources: sources };
+        } catch (e) {
+            return { sources: [] };
         }
     }
 }
